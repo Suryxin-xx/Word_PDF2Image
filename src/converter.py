@@ -1,11 +1,12 @@
 """
-核心转换模块 — PDF 导出为图片
+核心转换模块 — PDF / Word 导出为图片
 
 支持格式: PNG / JPEG / TIFF / BMP / WEBP
 支持扫描件增强（锐化 + 对比度 + 自动色阶）
 """
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -24,6 +25,195 @@ SUPPORTED_FORMATS = {
 
 FORMAT_KEYS = list(SUPPORTED_FORMATS.keys())
 DEFAULT_FORMAT = "PNG"
+SUPPORTED_INPUT_EXTENSIONS = {".pdf", ".doc", ".docx"}
+
+
+def parse_page_range(page_range: Optional[str], total: int) -> list[int]:
+    """解析页码范围，返回 0-based 页码列表；None 表示全部页面。"""
+    if total <= 0:
+        raise ValueError("文档没有可导出的页面")
+    if not page_range:
+        return list(range(total))
+
+    import re
+
+    pages = []
+    parts = re.split(r"[,，\s]+", page_range.strip())
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                a, b = part.split("-", 1)
+                start, end = int(a.strip()), int(b.strip())
+                if start < 1 or end > total or start > end:
+                    raise ValueError
+                pages.extend(range(start - 1, end))
+            else:
+                page_num = int(part)
+                if page_num < 1 or page_num > total:
+                    raise ValueError
+                pages.append(page_num - 1)
+        except ValueError as exc:
+            raise ValueError(
+                f"页码范围无效: {part}（文档共 {total} 页）"
+            ) from exc
+
+    if not pages:
+        raise ValueError("未解析到有效页码")
+
+    # 去重并保持输入顺序
+    return list(dict.fromkeys(pages))
+
+
+def word_to_pdf(
+    word_path: str,
+    pdf_path: str,
+    progress_cb: Optional[ProgressCB] = None,
+) -> str:
+    """
+    通过本机 Microsoft Word 将 .doc/.docx 只读导出为 PDF。
+
+    使用独立的隐藏 Word 实例，不保存或修改原文件；打开文档时强制禁用宏。
+    """
+    if os.name != "nt":
+        raise RuntimeError("Word 转换目前仅支持 Windows")
+
+    source = Path(word_path).resolve()
+    target = Path(pdf_path).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Word 文件不存在: {source}")
+    if source.suffix.lower() not in {".doc", ".docx"}:
+        raise ValueError(f"不支持的 Word 格式: {source.suffix}")
+
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError as exc:
+        raise RuntimeError(
+            "缺少 Word 自动化组件，请先安装依赖: pip install pywin32"
+        ) from exc
+
+    if progress_cb:
+        progress_cb(0, 0, "正在将 Word 转为 PDF...")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    word = None
+    document = None
+    pythoncom.CoInitialize()
+    try:
+        try:
+            # DispatchEx 创建独立实例，避免复用或关闭用户当前的 Word 窗口。
+            word = win32com.client.DispatchEx("Word.Application")
+        except Exception as exc:
+            raise RuntimeError(
+                "无法启动 Microsoft Word，请确认本机已安装桌面版 Word"
+            ) from exc
+
+        word.Visible = False
+        word.DisplayAlerts = 0
+        try:
+            word.AutomationSecurity = 3  # msoAutomationSecurityForceDisable
+        except Exception:
+            pass
+
+        document = word.Documents.Open(
+            str(source),
+            ConfirmConversions=False,
+            ReadOnly=True,
+            AddToRecentFiles=False,
+            Revert=False,
+            NoEncodingDialog=True,
+        )
+        document.ExportAsFixedFormat(
+            OutputFileName=str(target),
+            ExportFormat=17,  # wdExportFormatPDF
+            OpenAfterExport=False,
+            OptimizeFor=0,   # wdExportOptimizeForPrint
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Word 转 PDF 失败: {exc}") from exc
+    finally:
+        if document is not None:
+            try:
+                document.Close(SaveChanges=False)
+            except Exception:
+                pass
+        if word is not None:
+            try:
+                word.Quit(SaveChanges=False)
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+
+    if not target.is_file() or target.stat().st_size == 0:
+        raise RuntimeError("Word 未能生成有效的临时 PDF")
+    return str(target)
+
+
+def document_to_images(
+    input_path: str,
+    output_dir: str,
+    fmt: str = "PNG",
+    dpi: int = 200,
+    quality: int = 90,
+    pages: Optional[list] = None,
+    page_range: Optional[str] = None,
+    progress_cb: Optional[ProgressCB] = None,
+    image_enhance: bool = False,
+    enhance_sharpness: int = 80,
+    enhance_cutoff: int = 2,
+    enhance_contrast: float = 1.15,
+) -> list[str]:
+    """
+    将 PDF 或 Word 文档逐页导出为图片。
+
+    Word 文件会先在系统临时目录中转为 PDF，完成或失败后自动清理。
+    """
+    source = Path(input_path).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"输入文件不存在: {source}")
+
+    ext = source.suffix.lower()
+    if ext not in SUPPORTED_INPUT_EXTENSIONS:
+        supported = ", ".join(sorted(SUPPORTED_INPUT_EXTENSIONS))
+        raise ValueError(f"不支持的输入格式: {ext or '无扩展名'}，可选: {supported}")
+    if pages is not None and page_range is not None:
+        raise ValueError("pages 和 page_range 不能同时指定")
+
+    def convert_pdf(pdf_path: str) -> list[str]:
+        selected_pages = pages
+        if selected_pages is None and page_range is not None:
+            import fitz
+
+            with fitz.open(pdf_path) as doc:
+                selected_pages = parse_page_range(page_range, len(doc))
+
+        return pdf_to_images(
+            pdf_path,
+            output_dir,
+            fmt=fmt,
+            dpi=dpi,
+            quality=quality,
+            pages=selected_pages,
+            progress_cb=progress_cb,
+            image_enhance=image_enhance,
+            enhance_sharpness=enhance_sharpness,
+            enhance_cutoff=enhance_cutoff,
+            enhance_contrast=enhance_contrast,
+            output_base_name=source.stem,
+        )
+
+    if ext == ".pdf":
+        return convert_pdf(str(source))
+
+    with tempfile.TemporaryDirectory(prefix="pdf2image_word_") as temp_dir:
+        temp_pdf = Path(temp_dir) / f"{source.stem}.pdf"
+        word_to_pdf(str(source), str(temp_pdf), progress_cb=progress_cb)
+        return convert_pdf(str(temp_pdf))
 
 
 def pdf_to_images(
@@ -38,6 +228,7 @@ def pdf_to_images(
     enhance_sharpness: int = 80,
     enhance_cutoff: int = 2,
     enhance_contrast: float = 1.15,
+    output_base_name: Optional[str] = None,
 ) -> list[str]:
     """
     将 PDF 每页导出为图片。
@@ -54,6 +245,7 @@ def pdf_to_images(
         enhance_sharpness: 锐化强度 (0-200，0=不锐化，默认80)
         enhance_cutoff:   去黄力度 (0-10，0=不去黄，默认2)
         enhance_contrast: 对比度 (1.0-2.0，默认1.15)
+        output_base_name: 输出文件名前缀，默认使用 PDF 文件名
 
     返回:
         生成的文件路径列表
@@ -82,7 +274,7 @@ def pdf_to_images(
         raise ValueError("没有需要处理的页面")
 
     os.makedirs(output_dir, exist_ok=True)
-    base_name = Path(pdf_path).stem
+    base_name = output_base_name or Path(pdf_path).stem
 
     generated = []
     save_kwargs = _get_save_kwargs(pil_fmt, quality)

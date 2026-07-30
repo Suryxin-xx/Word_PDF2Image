@@ -1,3 +1,4 @@
 PyMuPDF>=1.25.0,<2.0.0
 Pillow>=11.0.0,<12.0.0
+pywin32>=308,<400; platform_system == "Windows"
 pyinstaller>=6.0.0,<7.0.0

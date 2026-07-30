@@ -39,7 +39,14 @@ foreach ($d in @("build", $OutputDir)) { if (Test-Path $d) { Remove-Item -Recurs
 
 # 打包
 $EntryPoint = Join-Path $ScriptDir "main.py"
-$PyArgs = @("--clean", "--name", "PDF2Image", "--distpath", $OutputDir)
+$PyArgs = @(
+    "--clean",
+    "--name", "PDF2Image",
+    "--distpath", $OutputDir,
+    "--hidden-import", "pythoncom",
+    "--hidden-import", "pywintypes",
+    "--hidden-import", "win32com.client"
+)
 
 if ($OneDir) { $PyArgs += "--onedir" }
 else { $PyArgs += "--onefile"; $PyArgs += "--noconsole" }

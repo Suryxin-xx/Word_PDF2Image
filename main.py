@@ -1,11 +1,12 @@
 """
-PDF导出为图片 - 主入口
+PDF / Word 导出为图片 - 主入口
 
-将 PDF 的每一页导出为图片文件，支持多种图片格式。
+将 PDF 或 Word 的每一页导出为图片文件，支持多种图片格式。
 
 用法:
     python main.py                    # GUI 模式
     python main.py input.pdf          # CLI 模式（默认 PNG, 200 DPI）
+    python main.py input.docx         # Word 转图片（需要安装 Microsoft Word）
     python main.py input.pdf -f JPEG --dpi 300 -q 95
     python main.py input.pdf -f TIFF -p 1-5,8,10
 """
@@ -19,7 +20,7 @@ if getattr(sys, "frozen", False):
     os.chdir(os.path.dirname(sys.executable))
 
 from src.gui import PDF2ImageApp
-from src.converter import pdf_to_images, FORMAT_KEYS, DEFAULT_FORMAT
+from src.converter import document_to_images, FORMAT_KEYS, DEFAULT_FORMAT
 
 
 def _fmt_size(byte: int) -> str:
@@ -32,10 +33,10 @@ def _fmt_size(byte: int) -> str:
 
 def cli_mode():
     parser = argparse.ArgumentParser(
-        description="将 PDF 导出为图片"
+        description="将 PDF 或 Word 文档导出为图片"
     )
-    parser.add_argument("input", help="PDF 文件路径")
-    parser.add_argument("-o", "--output", help="输出目录（默认: PDF文件名_图片/）")
+    parser.add_argument("input", help="PDF、DOC 或 DOCX 文件路径")
+    parser.add_argument("-o", "--output", help="输出目录（默认: 文件名_图片/）")
     parser.add_argument("-f", "--format", default=DEFAULT_FORMAT,
                         choices=FORMAT_KEYS,
                         help=f"图片格式（默认: {DEFAULT_FORMAT}）")
@@ -57,37 +58,6 @@ def cli_mode():
         print(f"[错误] 文件不存在: {args.input}")
         sys.exit(1)
 
-    # 解析页面范围
-    pages = None
-    if args.pages:
-        import fitz
-        doc = fitz.open(args.input)
-        total = len(doc)
-        doc.close()
-
-        import re
-        raw = args.pages
-        parsed = []
-        parts = re.split(r"[,，\s]+", raw)
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            if "-" in part:
-                a, b = part.split("-", 1)
-                start, end = int(a.strip()), int(b.strip())
-                if start < 1 or end > total or start > end:
-                    print(f"[错误] 页码范围无效: {part}")
-                    sys.exit(1)
-                parsed.extend(range(start - 1, end))
-            else:
-                n = int(part)
-                if n < 1 or n > total:
-                    print(f"[错误] 页码无效: {n}")
-                    sys.exit(1)
-                parsed.append(n - 1)
-        pages = sorted(set(parsed))
-
     # 输出目录
     from pathlib import Path
     inp = Path(args.input)
@@ -100,7 +70,7 @@ def cli_mode():
         sys.stdout.flush()
 
     try:
-        print(f"PDF:    {args.input}")
+        print(f"文件:   {args.input}")
         print(f"输出:   {out_dir}")
         print(f"格式:   {args.format}")
         print(f"DPI:    {args.dpi}")
@@ -111,20 +81,17 @@ def cli_mode():
             print(f"  锐化强度: {args.enhance_sharpness}")
             print(f"  去黄力度: {args.enhance_cutoff}")
             print(f"  对比度:   {args.enhance_contrast}")
-        if pages is not None:
-            print(f"页数:   {len(pages)} 页（自定义）")
+        if args.pages:
+            print(f"页面:   {args.pages}（自定义）")
         else:
-            import fitz
-            d = fitz.open(args.input)
-            print(f"页数:   {len(d)} 页（全部）")
-            d.close()
+            print("页面:   全部")
 
-        generated = pdf_to_images(
+        generated = document_to_images(
             args.input, out_dir,
             fmt=args.format,
             dpi=args.dpi,
             quality=args.quality,
-            pages=pages,
+            page_range=args.pages,
             progress_cb=cb,
             image_enhance=args.enhance,
             enhance_sharpness=args.enhance_sharpness,
@@ -133,7 +100,7 @@ def cli_mode():
         )
         print()
         total_size = sum(os.path.getsize(f) for f in generated)
-        print(f"\n✓ 导出完成！共 {len(generated)} 张图片，总大小 {_fmt_size(total_size)}")
+        print(f"\n[完成] 共导出 {len(generated)} 张图片，总大小 {_fmt_size(total_size)}")
         print(f"  目录: {out_dir}")
     except Exception as e:
         print(f"\n[错误] {e}")

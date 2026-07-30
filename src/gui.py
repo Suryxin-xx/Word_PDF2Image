@@ -1,8 +1,8 @@
 """
-图形界面 — PDF 导出为图片
+图形界面 — PDF / Word 导出为图片
 
 功能：
-  - 选择 PDF 文件 + 输出目录
+  - 选择 PDF / Word 文件 + 输出目录
   - 选择图片格式（PNG/JPEG/TIFF/BMP/WEBP）
   - 调节 DPI 和质量
   - 选择页面范围（全部 / 自定义）
@@ -11,7 +11,6 @@
 """
 
 import os
-import re
 import threading
 import tkinter as tk
 import ctypes
@@ -19,28 +18,36 @@ from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 
 from src.converter import (
-    pdf_to_images,
+    document_to_images,
     SUPPORTED_FORMATS,
+    SUPPORTED_INPUT_EXTENSIONS,
     FORMAT_KEYS,
     DEFAULT_FORMAT,
 )
 
 
 class PDF2ImageApp:
-    """PDF 导出为图片 — 主窗口"""
+    """PDF / Word 导出为图片 — 主窗口"""
 
     def __init__(self):
         self._enable_dpi_awareness()
         self.root = tk.Tk()
-        self.root.title("PDF导出为图片")
+        self.root.title("PDF/Word导出为图片")
         self.root.resizable(True, True)
         self._setup_style()
 
-        self.pdf_path = tk.StringVar()
+        self.input_path = tk.StringVar()
         self.out_dir = tk.StringVar()
         self.fmt_var = tk.StringVar(value=DEFAULT_FORMAT)
         self.dpi_var = tk.IntVar(value=200)
         self.quality_var = tk.IntVar(value=90)
+        self.quality_input_var = tk.StringVar(value="90")
+        self.input_type_var = tk.StringVar(value="PDF / WORD")
+        self.input_status_var = tk.StringVar(value="等待选择文档")
+        self.output_type_var = tk.StringVar(value=DEFAULT_FORMAT)
+        self.enhance_option_text = tk.StringVar(
+            value="优化扫描件\n锐化 · 去黄 · 对比度"
+        )
 
         # 页面范围
         self.page_range_var = tk.StringVar(value="all")  # "all" 或 "custom"
@@ -51,9 +58,10 @@ class PDF2ImageApp:
         self.enhance_sharpness = tk.IntVar(value=80)
         self.enhance_cutoff = tk.IntVar(value=2)
         self.enhance_contrast = tk.DoubleVar(value=1.15)
+        self.input_path.trace_add("write", lambda *_: self._on_input_path_change())
         self.dpi_var.trace_add("write", lambda *_: self._refresh_summary())
-        self.quality_var.trace_add("write", lambda *_: self._refresh_summary())
-        self.page_range_var.trace_add("write", lambda *_: self._refresh_summary())
+        self.quality_var.trace_add("write", lambda *_: self._on_quality_change())
+        self.page_range_var.trace_add("write", lambda *_: self._on_page_mode_change())
         self.custom_pages_var.trace_add("write", lambda *_: self._refresh_summary())
 
         self._build_ui()
@@ -74,70 +82,146 @@ class PDF2ImageApp:
                 pass
 
     # ------------------------------------------------------------------
-    # 主题样式 — 参考 ResumeDetective (PyQt6) 设计语言
+    # 主题样式
     # ------------------------------------------------------------------
     def _setup_style(self):
         style = ttk.Style()
         style.theme_use("clam")
 
-        bg      = "#f5f5f7"    # 窗口背景
-        card_bg = "#ffffff"     # 卡片/输入框背景
-        fg      = "#1d1d1f"     # 主文字
-        sec_fg  = "#8e8e93"     # 辅助文字
-        accent  = "#007aff"     # 强调蓝
-        border  = "#d8d8de"     # 边框色
+        self.colors = {
+            "workspace": "#F3F6FA",
+            "card": "#FFFFFF",
+            "ink": "#172033",
+            "muted": "#667085",
+            "subtle": "#98A2B3",
+            "accent": "#2F6FED",
+            "accent_hover": "#245CC7",
+            "accent_soft": "#E9F0FF",
+            "border": "#DDE3EC",
+            "field": "#F8FAFD",
+            "success": "#12845B",
+        }
+        bg = self.colors["workspace"]
+        card_bg = self.colors["card"]
+        fg = self.colors["ink"]
+        sec_fg = self.colors["muted"]
+        accent = self.colors["accent"]
+        border = self.colors["border"]
 
         self.root.configure(bg=bg)
 
-        font      = ("Microsoft YaHei UI", 11)
-        font_sm   = ("Microsoft YaHei UI", 10)
-        font_btn  = ("Microsoft YaHei UI", 11, "bold")
-        font_bold = ("Microsoft YaHei UI", 11, "bold")
+        font = ("Microsoft YaHei UI", 10)
+        font_sm = ("Microsoft YaHei UI", 9)
+        font_btn = ("Microsoft YaHei UI", 10, "bold")
+        font_bold = ("Microsoft YaHei UI", 10, "bold")
 
-        # 全局默认
         style.configure(".", background=bg, foreground=fg, font=font)
-        style.configure("TFrame", background=bg)
+        style.configure("Workspace.TFrame", background=bg)
         style.configure("Card.TFrame", background=card_bg)
         style.configure("TLabel", background=card_bg, foreground=fg)
-        style.configure("Card.TLabel", background=card_bg, foreground=fg)
-        style.configure("Secondary.TLabel", background=card_bg, foreground=sec_fg, font=font_sm)
-        style.configure("Status.TLabel", background=card_bg, foreground=sec_fg, font=font_sm)
-        style.configure("Hero.TFrame", background=card_bg)
-        style.configure("HeroTitle.TLabel", background=card_bg, foreground=fg,
-                        font=("Microsoft YaHei UI", 18, "bold"))
+        style.configure(
+            "Kicker.TLabel", background=card_bg, foreground=accent,
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.configure(
+            "HeroTitle.TLabel", background=card_bg, foreground=fg,
+            font=("Microsoft YaHei UI", 22, "bold"),
+        )
         style.configure("HeroSub.TLabel", background=card_bg, foreground=sec_fg,
-                        font=("Microsoft YaHei UI", 11))
-        style.configure("Hint.TLabel", background=card_bg, foreground=sec_fg,
-                        font=font_sm)
-        style.configure("Value.TLabel", background=card_bg, foreground=accent,
-                        font=("Microsoft YaHei UI", 11, "bold"))
+                        font=("Microsoft YaHei UI", 10))
+        style.configure(
+            "CardTitle.TLabel", background=card_bg, foreground=fg,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        style.configure(
+            "FieldLabel.TLabel", background=card_bg, foreground=fg,
+            font=font_bold,
+        )
+        style.configure(
+            "Secondary.TLabel", background=card_bg, foreground=sec_fg,
+            font=font_sm,
+        )
+        style.configure(
+            "Micro.TLabel", background=card_bg, foreground=self.colors["subtle"],
+            font=("Segoe UI", 8, "bold"),
+        )
+        style.configure(
+            "InputBadge.TLabel", background=self.colors["accent_soft"],
+            foreground=accent, font=("Segoe UI", 10, "bold"), padding=(12, 7),
+        )
+        style.configure(
+            "OutputBadge.TLabel", background=accent, foreground="#FFFFFF",
+            font=("Segoe UI", 10, "bold"), padding=(12, 7),
+        )
+        style.configure(
+            "Arrow.TLabel", background=card_bg, foreground=self.colors["subtle"],
+            font=("Segoe UI", 15),
+        )
+        style.configure(
+            "Status.TLabel", background=card_bg, foreground=fg,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        style.configure(
+            "Summary.TLabel", background=card_bg, foreground=sec_fg,
+            font=font_sm,
+        )
+        style.configure(
+            "Callout.TFrame", background=self.colors["accent_soft"],
+        )
+        style.configure(
+            "CalloutTitle.TLabel", background=self.colors["accent_soft"],
+            foreground=accent, font=font_bold,
+        )
+        style.configure(
+            "CalloutText.TLabel", background=self.colors["accent_soft"],
+            foreground=sec_fg, font=font_sm,
+        )
 
-        # 标题区
-        style.configure("Header.TLabel", background=card_bg, foreground=fg,
-                        font=font_bold)
-
-        # 主按钮 — 蓝色
-        style.configure("TButton", background=accent, foreground="white",
-                        borderwidth=0, focuscolor="none", font=font_btn,
-                        padding=(30, 10))
-        style.map("TButton",
-                   background=[("active", "#0066d9")],
-                   relief=[("pressed", "flat")])
-
-        # 次要按钮 — 白底 + 边框（如 ResumeDetective）
+        style.configure(
+            "Action.TButton", background=accent, foreground="white",
+            borderwidth=0, focuscolor=accent, font=font_btn, padding=(28, 12),
+        )
+        style.map(
+            "Action.TButton",
+            background=[
+                ("disabled", "#AFC4F3"),
+                ("active", self.colors["accent_hover"]),
+                ("pressed", "#1E4FAE"),
+            ],
+            foreground=[("disabled", "#F7F9FC")],
+        )
         style.configure("Browse.TButton", background=card_bg, foreground=fg,
-                        borderwidth=1, focuscolor="none",
-                        font=font, padding=(10, 6))
-        style.map("Browse.TButton",
-                   background=[("active", "#f0f3f6"), ("pressed", "#e7ebf0")],
-                   relief=[("pressed", "sunken")])
+                        borderwidth=1, bordercolor=border, focuscolor=accent,
+                        font=font, padding=(12, 7))
+        style.map(
+            "Browse.TButton",
+            background=[
+                ("disabled", "#F3F5F8"),
+                ("active", self.colors["accent_soft"]),
+                ("pressed", "#DCE8FF"),
+            ],
+            foreground=[
+                ("disabled", self.colors["subtle"]),
+                ("active", accent),
+            ],
+        )
 
-        # 输入框 — 白底 + 边框
-        style.configure("TEntry", fieldbackground=card_bg, borderwidth=1,
-                        bordercolor=border, padding=(10, 7))
-        style.configure("TCombobox", fieldbackground=card_bg, borderwidth=1,
-                        bordercolor=border, padding=(8, 5),
-                        arrowcolor=sec_fg)
+        style.configure(
+            "TEntry", fieldbackground=self.colors["field"], borderwidth=1,
+            bordercolor=border, lightcolor=border, darkcolor=border,
+            padding=(10, 8),
+        )
+        style.map(
+            "TEntry",
+            bordercolor=[("focus", accent)],
+            lightcolor=[("focus", accent)],
+            darkcolor=[("focus", accent)],
+        )
+        style.configure(
+            "TCombobox", fieldbackground=self.colors["field"], borderwidth=1,
+            bordercolor=border, lightcolor=border, darkcolor=border,
+            padding=(9, 7), arrowcolor=sec_fg,
+        )
         style.configure("TRadiobutton", background=card_bg, foreground=fg,
                         indicatorforeground=accent)
         style.configure("TCheckbutton", background=card_bg, foreground=fg,
@@ -145,245 +229,402 @@ class PDF2ImageApp:
         style.map("TRadiobutton", background=[("active", card_bg)])
         style.map("TCheckbutton", background=[("active", card_bg)])
 
-        # 滑块
-        style.configure("Horizontal.TScale", background=card_bg, troughcolor="#e8e8ed",
+        style.configure("Horizontal.TScale", background=card_bg, troughcolor="#E7ECF3",
                         slidercolor=accent, sliderlength=20, borderwidth=0)
 
-        # 进度条
-        style.configure("TProgressbar", background=accent, troughcolor="#e8e8ed",
-                        borderwidth=0, thickness=6)
-
-        # 分隔线
-        style.configure("TSeparator", background="#e5e5ea")
-
-        # LabelFrame — 卡片分组
-        style.configure("Card.TLabelframe", background=card_bg, foreground=fg,
-                        bordercolor=border, borderwidth=1, relief="solid",
-                        padding=8)
-        style.configure("Card.TLabelframe.Label", background=card_bg, foreground=fg,
-                        font=font_sm)
+        style.configure(
+            "TProgressbar", background=accent, troughcolor="#E7ECF3",
+            borderwidth=0, thickness=8,
+        )
+        style.configure("TSeparator", background=self.colors["border"])
 
     # ------------------------------------------------------------------
     # 布局
     # ------------------------------------------------------------------
-    def _build_ui(self):
-        main = ttk.Frame(self.root, padding=18)
-        main.pack(fill=tk.BOTH, expand=True)
-        main.columnconfigure(0, weight=1)
+    def _create_card(self, parent, padding=(18, 16)):
+        outer = tk.Frame(
+            parent,
+            bg=self.colors["card"],
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["border"],
+            highlightthickness=1,
+            bd=0,
+        )
+        inner = ttk.Frame(outer, style="Card.TFrame", padding=padding)
+        inner.pack(fill=tk.BOTH, expand=True)
+        return outer, inner
 
-        hero = ttk.Frame(main, style="Hero.TFrame", padding=(18, 16))
-        hero.grid(row=0, column=0, sticky=tk.EW, pady=(0, 12))
-        hero.columnconfigure(0, weight=1)
-        ttk.Label(hero, text="PDF 导出为图片", style="HeroTitle.TLabel").grid(
+    @staticmethod
+    def _section_heading(parent, number, title, subtitle):
+        ttk.Label(parent, text=number, style="Kicker.TLabel").grid(
             row=0, column=0, sticky=tk.W
+        )
+        ttk.Label(parent, text=title, style="CardTitle.TLabel").grid(
+            row=1, column=0, sticky=tk.W, pady=(3, 0)
+        )
+        if subtitle:
+            ttk.Label(parent, text=subtitle, style="Secondary.TLabel").grid(
+                row=2, column=0, sticky=tk.W, pady=(5, 0)
+            )
+
+    def _choice_radio(self, parent, text, variable, value, command=None):
+        """创建大尺寸、带明确选中态的块状单选按钮。"""
+        return tk.Radiobutton(
+            parent,
+            text=text,
+            variable=variable,
+            value=value,
+            command=command,
+            indicatoron=False,
+            bg=self.colors["field"],
+            fg=self.colors["ink"],
+            selectcolor=self.colors["accent_soft"],
+            activebackground=self.colors["accent_soft"],
+            activeforeground=self.colors["accent"],
+            disabledforeground=self.colors["subtle"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["accent"],
+            font=("Segoe UI", 10, "bold"),
+            padx=10,
+            pady=10,
+            cursor="hand2",
+            takefocus=True,
+        )
+
+    def _numeric_entry(self, parent, text_var, start, end, increment, command):
+        """创建可输入、可用箭头微调的数值框。"""
+        entry = tk.Spinbox(
+            parent,
+            from_=start,
+            to=end,
+            increment=increment,
+            textvariable=text_var,
+            command=command,
+            width=6,
+            justify=tk.CENTER,
+            font=("Segoe UI", 11, "bold"),
+            bg=self.colors["field"],
+            fg=self.colors["ink"],
+            buttonbackground=self.colors["accent_soft"],
+            relief=tk.SOLID,
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["accent"],
+        )
+        entry.bind("<Return>", lambda _event: command())
+        entry.bind("<FocusOut>", lambda _event: command())
+        entry.bind(
+            "<FocusIn>",
+            lambda _event: entry.after_idle(lambda: entry.selection_range(0, tk.END)),
+        )
+        entry.commit_numeric = command
+        return entry
+
+    def _build_ui(self):
+        main = ttk.Frame(self.root, style="Workspace.TFrame", padding=20)
+        main.pack(fill=tk.BOTH, expand=True)
+        main.columnconfigure(0, weight=11, uniform="content")
+        main.columnconfigure(1, weight=9, uniform="content")
+        main.rowconfigure(1, weight=1)
+
+        hero_outer, hero = self._create_card(main, padding=(22, 18))
+        hero_outer.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=(0, 14))
+        hero.columnconfigure(0, weight=1)
+        ttk.Label(
+            hero, text="DOCUMENT RASTERIZER", style="Kicker.TLabel"
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(hero, text="文档逐页导出", style="HeroTitle.TLabel").grid(
+            row=1, column=0, sticky=tk.W, pady=(2, 0)
         )
         ttk.Label(
             hero,
-            text="把 PDF 页面批量导出成清晰图片，适合留档、发图和打印前检查。",
+            text="把 PDF 或 Word 变成清晰、可分享的逐页图片。",
             style="HeroSub.TLabel",
-        ).grid(row=1, column=0, sticky=tk.W, pady=(6, 12))
-        stats = ttk.Frame(hero, style="Hero.TFrame")
-        stats.grid(row=2, column=0, sticky=tk.W)
-        self.summary_var = tk.StringVar(value="PNG · 200 DPI · 全部页面")
-        ttk.Label(stats, text="当前配置", style="Hint.TLabel").pack(side=tk.LEFT)
-        ttk.Label(stats, textvariable=self.summary_var, style="Value.TLabel").pack(
-            side=tk.LEFT, padx=(8, 0)
-        )
+        ).grid(row=2, column=0, sticky=tk.W, pady=(7, 0))
 
-        # ── 文件区卡片 ──
-        file_card = ttk.LabelFrame(main, text="文件位置", style="Card.TLabelframe",
-                                   padding=(12, 10))
-        file_card.grid(row=1, column=0, sticky=tk.EW, pady=(0, 12))
+        pipeline = ttk.Frame(hero, style="Card.TFrame")
+        pipeline.grid(row=0, column=1, rowspan=3, sticky=tk.E)
+        ttk.Label(pipeline, text="INPUT", style="Micro.TLabel").grid(
+            row=0, column=0, sticky=tk.W, pady=(0, 5)
+        )
+        ttk.Label(pipeline, text="OUTPUT", style="Micro.TLabel").grid(
+            row=0, column=2, sticky=tk.W, pady=(0, 5)
+        )
+        ttk.Label(
+            pipeline, textvariable=self.input_type_var, style="InputBadge.TLabel"
+        ).grid(row=1, column=0)
+        ttk.Label(pipeline, text="→", style="Arrow.TLabel").grid(
+            row=1, column=1, padx=12
+        )
+        ttk.Label(
+            pipeline, textvariable=self.output_type_var, style="OutputBadge.TLabel"
+        ).grid(row=1, column=2)
+
+        # 左栏：输入与输出位置
+        file_outer, file_card = self._create_card(main)
+        file_outer.grid(row=1, column=0, sticky=tk.NSEW, padx=(0, 7))
         file_card.columnconfigure(0, weight=1)
-
-        # PDF 文件
-        ttk.Label(file_card, text="PDF 文件", style="Header.TLabel").grid(
-            row=0, column=0, sticky=tk.W, pady=(0, 4))
-        pdf_row = ttk.Frame(file_card, style="Card.TFrame")
-        pdf_row.grid(row=1, column=0, sticky=tk.EW)
-        pdf_row.columnconfigure(0, weight=1)
-        ttk.Entry(pdf_row, textvariable=self.pdf_path).grid(
-            row=0, column=0, sticky=tk.EW, padx=(0, 6))
-        ttk.Button(pdf_row, text="浏览…", command=self._browse_pdf,
-                   style="Browse.TButton").grid(row=0, column=1)
-        ttk.Label(file_card, text="选择一个 PDF，程序会自动带出默认输出文件夹。",
-                  style="Secondary.TLabel").grid(row=2, column=0, sticky=tk.W, pady=(4, 0))
-
-        # 输出目录
-        ttk.Label(file_card, text="输出目录", style="Header.TLabel").grid(
-            row=3, column=0, sticky=tk.W, pady=(12, 4))
-        out_row = ttk.Frame(file_card, style="Card.TFrame")
-        out_row.grid(row=4, column=0, sticky=tk.EW)
-        out_row.columnconfigure(0, weight=1)
-        ttk.Entry(out_row, textvariable=self.out_dir).grid(
-            row=0, column=0, sticky=tk.EW, padx=(0, 6))
-        ttk.Button(out_row, text="浏览…", command=self._browse_output,
-                   style="Browse.TButton").grid(row=0, column=1)
-        ttk.Label(file_card, text="建议使用单独文件夹，避免和原有图片混在一起。",
-                  style="Secondary.TLabel").grid(row=5, column=0, sticky=tk.W, pady=(4, 0))
-
-        # ── 选项区卡片 ──
-        opt_card = ttk.LabelFrame(main, text="导出设置", style="Card.TLabelframe",
-                                  padding=(12, 10))
-        opt_card.grid(row=2, column=0, sticky=tk.EW, pady=(0, 12))
-        opt_card.columnconfigure(0, weight=1)
-
-        # 图片格式 + DPI 同行
-        row_fmt = ttk.Frame(opt_card, style="Card.TFrame")
-        row_fmt.grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
-        ttk.Label(row_fmt, text="格式", style="Header.TLabel").pack(
-            side=tk.LEFT, padx=(0, 8))
-        self.fmt_combo = ttk.Combobox(
-            row_fmt, textvariable=self.fmt_var, values=FORMAT_KEYS,
-            state="readonly", width=10)
-        self.fmt_combo.pack(side=tk.LEFT)
-        self.fmt_combo.bind("<<ComboboxSelected>>", self._on_fmt_change)
-        self.fmt_desc = ttk.Label(row_fmt, text="", style="Secondary.TLabel")
-        self.fmt_desc.pack(side=tk.LEFT, padx=(10, 0))
-        self._update_fmt_desc()
-
-        row_dpi = ttk.Frame(opt_card, style="Card.TFrame")
-        row_dpi.grid(row=1, column=0, sticky=tk.W, pady=(0, 8))
-        ttk.Label(row_dpi, text="DPI", style="Header.TLabel").pack(
-            side=tk.LEFT, padx=(0, 8))
-        for val in (150, 200, 300, 400):
-            ttk.Radiobutton(
-                row_dpi, text=str(val), variable=self.dpi_var, value=val
-            ).pack(side=tk.LEFT, padx=6)
-
-        # 质量（仅 JPEG/WEBP）
-        self.quality_frame = ttk.Frame(opt_card, style="Card.TFrame")
-        self.quality_frame.grid(row=2, column=0, sticky=tk.W, pady=(0, 8))
-        self.quality_frame.grid_remove()
-        ttk.Label(self.quality_frame, text="质量",
-                  style="Header.TLabel").pack(side=tk.LEFT, padx=(0, 8))
-        self.quality_scale = ttk.Scale(
-            self.quality_frame, from_=10, to=100,
-            variable=self.quality_var, orient=tk.HORIZONTAL, length=220)
-        self.quality_scale.pack(side=tk.LEFT)
-        self.quality_label = ttk.Label(self.quality_frame, text="90", width=3)
-        self.quality_label.pack(side=tk.LEFT, padx=(4, 4))
-        ttk.Label(self.quality_frame, text="JPEG / WEBP",
-                  style="Secondary.TLabel").pack(side=tk.LEFT)
-        self.quality_var.trace_add("write", lambda *_: self.quality_label.config(
-            text=str(self.quality_var.get())))
-
-        # 扫描件增强
-        row_enh = ttk.Frame(opt_card, style="Card.TFrame")
-        row_enh.grid(row=3, column=0, sticky=tk.W, pady=(0, 4))
-        self.enhance_cb = ttk.Checkbutton(
-            row_enh, text="扫描件增强",
-            variable=self.enhance_var,
-            command=self._on_enhance_toggle,
+        self._section_heading(
+            file_card, "01 · DOCUMENT", "选择文档", "来源文件与图片保存位置"
         )
-        self.enhance_cb.pack(side=tk.LEFT)
-        ttk.Label(row_enh, text="锐化 / 去黄 / 对比度",
-                  style="Secondary.TLabel").pack(side=tk.LEFT, padx=(6, 0))
 
-        # ── 增强参数（默认隐藏）──
-        self.enhance_params_frame = ttk.Frame(opt_card, style="Card.TFrame",
-                                               padding=(8, 6))
-        self.enhance_params_frame.grid(row=4, column=0, sticky=tk.EW, pady=(4, 0))
-        self.enhance_params_frame.grid_remove()
-
-        # 锐化
-        ttk.Label(self.enhance_params_frame,
-                  text="锐化", font=("Microsoft YaHei UI", 10)).grid(
-            row=0, column=0, sticky=tk.W, padx=(0, 4))
-        ttk.Scale(self.enhance_params_frame, from_=0, to=200,
-                  variable=self.enhance_sharpness, orient=tk.HORIZONTAL,
-                  length=220).grid(row=0, column=1, padx=(0, 4))
-        self.sharp_label = ttk.Label(self.enhance_params_frame,
-                                     text="80", width=4, font=("Microsoft YaHei UI", 10))
-        self.sharp_label.grid(row=0, column=2)
-        self.enhance_sharpness.trace_add("write", lambda *_: self.sharp_label.config(
-            text=str(self.enhance_sharpness.get())))
-
-        # 去黄
-        ttk.Label(self.enhance_params_frame,
-                  text="去黄", font=("Microsoft YaHei UI", 10)).grid(
-            row=1, column=0, sticky=tk.W, padx=(0, 4), pady=(4, 0))
-        ttk.Scale(self.enhance_params_frame, from_=0, to=10,
-                  variable=self.enhance_cutoff, orient=tk.HORIZONTAL,
-                  length=220).grid(row=1, column=1, padx=(0, 4), pady=(4, 0))
-        self.cutoff_label = ttk.Label(self.enhance_params_frame,
-                                      text="2", width=4, font=("Microsoft YaHei UI", 10))
-        self.cutoff_label.grid(row=1, column=2, pady=(4, 0))
-        self.enhance_cutoff.trace_add("write", lambda *_: self.cutoff_label.config(
-            text=str(self.enhance_cutoff.get())))
-
-        # 对比度
-        ttk.Label(self.enhance_params_frame,
-                  text="对比度", font=("Microsoft YaHei UI", 10)).grid(
-            row=2, column=0, sticky=tk.W, padx=(0, 4), pady=(4, 0))
-        ttk.Scale(self.enhance_params_frame, from_=1.0, to=2.0,
-                  variable=self.enhance_contrast, orient=tk.HORIZONTAL,
-                  length=220).grid(row=2, column=1, padx=(0, 4), pady=(4, 0))
-        self.contrast_label = ttk.Label(self.enhance_params_frame,
-                                        text="1.15", width=4, font=("Microsoft YaHei UI", 10))
-        self.contrast_label.grid(row=2, column=2, pady=(4, 0))
-        self.enhance_contrast.trace_add("write", lambda *_: self.contrast_label.config(
-            text=f"{self.enhance_contrast.get():.2f}"))
-
-        # 恢复默认按钮
-        ttk.Button(self.enhance_params_frame, text="恢复默认",
-                   style="Browse.TButton",
-                   command=self._enhance_reset_default).grid(
-            row=0, column=3, rowspan=3, sticky=tk.SE, padx=(10, 0))
-
-        # 页面范围
-        row_page = ttk.Frame(opt_card, style="Card.TFrame")
-        row_page.grid(row=5, column=0, sticky=tk.W, pady=(6, 0))
-        ttk.Label(row_page, text="页面",
-                  style="Header.TLabel").pack(side=tk.LEFT, padx=(0, 8))
-        self.all_radio = ttk.Radiobutton(
-            row_page, text="全部", variable=self.page_range_var, value="all"
-        )
-        self.all_radio.pack(side=tk.LEFT)
-        self.custom_radio = ttk.Radiobutton(
-            row_page, text="自定义", variable=self.page_range_var, value="custom"
-        )
-        self.custom_radio.pack(side=tk.LEFT, padx=(8, 4))
-        self.custom_entry = ttk.Entry(row_page, textvariable=self.custom_pages_var, width=20)
-        self.custom_entry.pack(side=tk.LEFT)
-        ttk.Label(row_page, text="1,3,5-10",
-                  style="Secondary.TLabel").pack(side=tk.LEFT, padx=(4, 0))
-
-        action_card = ttk.Frame(main, style="Hero.TFrame", padding=(16, 14))
-        action_card.grid(row=3, column=0, sticky=tk.EW)
-        action_card.columnconfigure(0, weight=1)
-        ttk.Label(action_card, text="导出进度", style="Header.TLabel").grid(
+        input_header = ttk.Frame(file_card, style="Card.TFrame")
+        input_header.grid(row=3, column=0, sticky=tk.EW, pady=(22, 7))
+        input_header.columnconfigure(0, weight=1)
+        ttk.Label(input_header, text="来源文件", style="FieldLabel.TLabel").grid(
             row=0, column=0, sticky=tk.W
         )
         ttk.Label(
-            action_card,
-            text="确认设置后开始导出，过程中会实时显示当前进度。",
-            style="Hint.TLabel",
-        ).grid(row=1, column=0, sticky=tk.W, pady=(4, 10))
+            input_header, textvariable=self.input_status_var, style="Secondary.TLabel"
+        ).grid(row=0, column=1, sticky=tk.E)
+        pdf_row = ttk.Frame(file_card, style="Card.TFrame")
+        pdf_row.grid(row=4, column=0, sticky=tk.EW)
+        pdf_row.columnconfigure(0, weight=1)
+        ttk.Entry(pdf_row, textvariable=self.input_path).grid(
+            row=0, column=0, sticky=tk.EW, padx=(0, 8)
+        )
+        ttk.Button(pdf_row, text="浏览…", command=self._browse_input,
+                   style="Browse.TButton").grid(row=0, column=1)
+        ttk.Label(
+            file_card, text="支持 PDF · DOC · DOCX",
+            style="Secondary.TLabel",
+        ).grid(row=5, column=0, sticky=tk.W, pady=(6, 0))
 
-        # ── 底部按钮 + 进度 ──
-        btn_frame = ttk.Frame(action_card, style="Hero.TFrame")
-        btn_frame.grid(row=2, column=0, pady=(0, 10))
-        self.btn_convert = ttk.Button(btn_frame, text="开始导出",
-                                      command=self._start_convert)
-        self.btn_convert.pack()
+        ttk.Separator(file_card).grid(
+            row=6, column=0, sticky=tk.EW, pady=(22, 20)
+        )
+        ttk.Label(file_card, text="保存到", style="FieldLabel.TLabel").grid(
+            row=7, column=0, sticky=tk.W, pady=(0, 7)
+        )
+        out_row = ttk.Frame(file_card, style="Card.TFrame")
+        out_row.grid(row=8, column=0, sticky=tk.EW)
+        out_row.columnconfigure(0, weight=1)
+        ttk.Entry(out_row, textvariable=self.out_dir).grid(
+            row=0, column=0, sticky=tk.EW, padx=(0, 8)
+        )
+        ttk.Button(out_row, text="浏览…", command=self._browse_output,
+                   style="Browse.TButton").grid(row=0, column=1)
+        ttk.Label(
+            file_card, text="选择来源文件后会自动生成默认文件夹。",
+            style="Secondary.TLabel",
+        ).grid(row=9, column=0, sticky=tk.W, pady=(6, 0))
 
-        self.progress = ttk.Progressbar(action_card, length=620, mode="determinate")
-        self.progress.grid(row=3, column=0, sticky=tk.EW, pady=(0, 6))
+        ttk.Separator(file_card).grid(
+            row=10, column=0, sticky=tk.EW, pady=(22, 14)
+        )
+        row_enh = ttk.Frame(file_card, style="Card.TFrame")
+        row_enh.grid(row=11, column=0, sticky=tk.EW)
+        row_enh.columnconfigure(0, weight=1)
+        self.enhance_cb = tk.Checkbutton(
+            row_enh,
+            textvariable=self.enhance_option_text,
+            variable=self.enhance_var,
+            command=self._on_enhance_toggle,
+            indicatoron=False,
+            anchor=tk.W,
+            justify=tk.LEFT,
+            bg=self.colors["field"],
+            fg=self.colors["ink"],
+            selectcolor=self.colors["accent_soft"],
+            activebackground=self.colors["accent_soft"],
+            activeforeground=self.colors["accent"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["accent"],
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=11,
+            cursor="hand2",
+            takefocus=True,
+        )
+        self.enhance_cb.grid(row=0, column=0, sticky=tk.EW)
+        self.enhance_settings_btn = ttk.Button(
+            row_enh, text="调整参数…", style="Browse.TButton",
+            command=self._open_enhance_settings, state=tk.DISABLED,
+        )
+        self.enhance_settings_btn.grid(
+            row=0, column=1, sticky=tk.NS, padx=(8, 0), ipadx=8
+        )
 
-        self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(action_card, textvariable=self.status_var,
-                  style="Status.TLabel").grid(
-            row=4, column=0, sticky=tk.W)
+        file_card.rowconfigure(12, weight=1)
+        word_note = ttk.Frame(file_card, style="Callout.TFrame", padding=(12, 10))
+        word_note.grid(row=13, column=0, sticky=tk.EW, pady=(22, 0))
+        ttk.Label(
+            word_note, text="WORD 转换", style="CalloutTitle.TLabel"
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(
+            word_note,
+            text="只读打开原文件；中间 PDF 会自动清理。需要本机安装 Microsoft Word。",
+            style="CalloutText.TLabel",
+            wraplength=500,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
+
+        # 右栏：图像规格与页面
+        opt_outer, opt_card = self._create_card(main)
+        opt_outer.grid(row=1, column=1, sticky=tk.NSEW, padx=(7, 0))
+        opt_card.columnconfigure(0, weight=1)
+        self._section_heading(
+            opt_card, "02 · IMAGE", "设置输出", ""
+        )
+
+        ttk.Label(opt_card, text="图片格式", style="FieldLabel.TLabel").grid(
+            row=3, column=0, sticky=tk.W, pady=(16, 6)
+        )
+        row_fmt = ttk.Frame(opt_card, style="Card.TFrame")
+        row_fmt.grid(row=4, column=0, sticky=tk.EW)
+        self.format_buttons = []
+        for column, fmt in enumerate(FORMAT_KEYS):
+            row_fmt.columnconfigure(column, weight=1, uniform="format")
+            button = self._choice_radio(
+                row_fmt, fmt, self.fmt_var, fmt, self._on_fmt_change
+            )
+            button.grid(
+                row=0, column=column, sticky=tk.EW,
+                padx=(0 if column == 0 else 3, 0 if column == 4 else 3),
+            )
+            self.format_buttons.append((fmt, button))
+        self.fmt_desc = ttk.Label(row_fmt, text="", style="Secondary.TLabel")
+        self.fmt_desc.grid(
+            row=1, column=0, columnspan=5, sticky=tk.W, pady=(7, 0)
+        )
+        self._update_fmt_desc()
+        self.fmt_desc.grid_remove()
+
+        ttk.Separator(opt_card).grid(
+            row=5, column=0, sticky=tk.EW, pady=(14, 12)
+        )
+        ttk.Label(opt_card, text="清晰度", style="FieldLabel.TLabel").grid(
+            row=6, column=0, sticky=tk.W, pady=(0, 6)
+        )
+        row_dpi = ttk.Frame(opt_card, style="Card.TFrame")
+        row_dpi.grid(row=7, column=0, sticky=tk.EW)
+        self.dpi_buttons = []
+        for column, val in enumerate((150, 200, 300, 400)):
+            row_dpi.columnconfigure(column, weight=1, uniform="dpi")
+            button = self._choice_radio(
+                row_dpi, f"{val} DPI", self.dpi_var, val, self._on_dpi_change
+            )
+            button.grid(
+                row=0, column=column, sticky=tk.EW,
+                padx=(0 if column == 0 else 3, 0 if column == 3 else 3),
+            )
+            self.dpi_buttons.append((val, button))
+
+        self.quality_frame = ttk.Frame(opt_card, style="Card.TFrame")
+        self.quality_frame.grid(row=8, column=0, sticky=tk.EW, pady=(8, 0))
+        self.quality_frame.grid_remove()
+        self.quality_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            self.quality_frame, text="压缩质量", style="Secondary.TLabel"
+        ).grid(row=0, column=0, sticky=tk.W)
+        self.quality_scale = tk.Scale(
+            self.quality_frame,
+            from_=10,
+            to=100,
+            variable=self.quality_var,
+            orient=tk.HORIZONTAL,
+            resolution=1,
+            showvalue=False,
+            bg=self.colors["card"],
+            troughcolor="#DCE5F2",
+            activebackground=self.colors["accent"],
+            sliderrelief=tk.FLAT,
+            sliderlength=32,
+            width=16,
+            highlightthickness=0,
+        )
+        self.quality_scale.grid(
+            row=1, column=0, columnspan=2, sticky=tk.EW, pady=(6, 0)
+        )
+        self.quality_entry = self._numeric_entry(
+            self.quality_frame,
+            self.quality_input_var,
+            start=10,
+            end=100,
+            increment=1,
+            command=self._commit_quality_input,
+        )
+        self.quality_entry.grid(row=0, column=1, sticky=tk.E)
+
+        ttk.Separator(opt_card).grid(
+            row=9, column=0, sticky=tk.EW, pady=(14, 12)
+        )
+        ttk.Label(opt_card, text="页面范围", style="FieldLabel.TLabel").grid(
+            row=10, column=0, sticky=tk.W, pady=(0, 6)
+        )
+        row_page = ttk.Frame(opt_card, style="Card.TFrame")
+        row_page.grid(row=11, column=0, sticky=tk.EW)
+        row_page.columnconfigure(0, weight=1, uniform="page")
+        row_page.columnconfigure(1, weight=1, uniform="page")
+        self.page_buttons = []
+        self.all_radio = self._choice_radio(
+            row_page, "全部页面", self.page_range_var, "all"
+        )
+        self.all_radio.grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
+        self.page_buttons.append(("all", self.all_radio))
+        self.custom_radio = self._choice_radio(
+            row_page, "指定页面", self.page_range_var, "custom"
+        )
+        self.custom_radio.grid(row=0, column=1, sticky=tk.EW, padx=(4, 0))
+        self.page_buttons.append(("custom", self.custom_radio))
+
+        custom_row = ttk.Frame(row_page, style="Card.TFrame")
+        custom_row.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0))
+        custom_row.columnconfigure(1, weight=1)
+        ttk.Label(
+            custom_row, text="页码", style="Secondary.TLabel"
+        ).grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        self.custom_entry = ttk.Entry(
+            custom_row, textvariable=self.custom_pages_var
+        )
+        self.custom_entry.grid(row=0, column=1, sticky=tk.EW)
+        ttk.Label(
+            custom_row, text="例如 1,3,5-10", style="Secondary.TLabel"
+        ).grid(row=0, column=2, sticky=tk.E, padx=(8, 0))
+
+        # 底部：状态与主操作
+        action_outer, action_card = self._create_card(main, padding=(18, 14))
+        action_outer.grid(
+            row=2, column=0, columnspan=2, sticky=tk.EW, pady=(14, 0)
+        )
+        action_card.columnconfigure(0, weight=1)
+        self.summary_var = tk.StringVar(value="PNG · 200 DPI · 全部页面")
+        self.status_var = tk.StringVar(value="等待选择文档")
+        ttk.Label(
+            action_card, textvariable=self.status_var, style="Status.TLabel"
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(
+            action_card, textvariable=self.summary_var, style="Summary.TLabel"
+        ).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
+        self.btn_convert = ttk.Button(
+            action_card, text="开始导出", command=self._start_convert,
+            style="Action.TButton",
+        )
+        self.btn_convert.grid(row=0, column=1, rowspan=2, sticky=tk.E, padx=(18, 0))
+        self.progress = ttk.Progressbar(action_card, mode="determinate")
+        self.progress.grid(
+            row=2, column=0, columnspan=2, sticky=tk.EW, pady=(13, 0)
+        )
+
+        self._on_page_mode_change()
         self._refresh_summary()
+        self._refresh_choice_styles()
+        self._on_input_path_change()
 
     def _apply_initial_window_size(self):
         self.root.update_idletasks()
         req_w = self.root.winfo_reqwidth()
         req_h = self.root.winfo_reqheight()
-        width = max(780, req_w + 24)
-        height = max(700, req_h + 24)
-        self.root.minsize(760, 660)
+        width = max(1040, req_w + 24)
+        height = max(690, req_h + 24)
+        self.root.minsize(920, 640)
         self._center_window(width, height)
 
     def _center_window(self, w: int, h: int):
@@ -398,10 +639,73 @@ class PDF2ImageApp:
     # ------------------------------------------------------------------
     # 格式联动
     # ------------------------------------------------------------------
+    def _refresh_choice_styles(self):
+        """刷新块状选项的选中边框、底色和文字颜色。"""
+        groups = (
+            (getattr(self, "format_buttons", []), self.fmt_var.get()),
+            (getattr(self, "dpi_buttons", []), self.dpi_var.get()),
+            (getattr(self, "page_buttons", []), self.page_range_var.get()),
+        )
+        for buttons, selected in groups:
+            for value, button in buttons:
+                is_selected = value == selected
+                button.config(
+                    bg=(
+                        self.colors["accent_soft"]
+                        if is_selected else self.colors["field"]
+                    ),
+                    fg=(
+                        self.colors["accent"]
+                        if is_selected else self.colors["ink"]
+                    ),
+                    highlightbackground=(
+                        self.colors["accent"]
+                        if is_selected else self.colors["border"]
+                    ),
+                )
+
+        if hasattr(self, "enhance_cb"):
+            enabled = self.enhance_var.get()
+            self.enhance_cb.config(
+                bg=(
+                    self.colors["accent_soft"]
+                    if enabled else self.colors["field"]
+                ),
+                fg=(
+                    self.colors["accent"]
+                    if enabled else self.colors["ink"]
+                ),
+                highlightbackground=(
+                    self.colors["accent"]
+                    if enabled else self.colors["border"]
+                ),
+            )
+
     def _on_fmt_change(self, event=None):
+        self.output_type_var.set(self.fmt_var.get())
         self._update_fmt_desc()
         self._update_fmt_quality_visibility()
+        self._refresh_choice_styles()
         self._refresh_summary()
+
+    def _on_dpi_change(self):
+        self._refresh_choice_styles()
+        self._refresh_summary()
+
+    def _on_quality_change(self):
+        self.quality_input_var.set(str(self.quality_var.get()))
+        if hasattr(self, "summary_var"):
+            self._refresh_summary()
+
+    def _commit_quality_input(self):
+        """提交质量输入框，纠正非数字或超出可用范围的值。"""
+        try:
+            quality = round(float(self.quality_input_var.get().strip()))
+        except ValueError:
+            quality = self.quality_var.get()
+        quality = max(10, min(100, quality))
+        self.quality_var.set(quality)
+        self.quality_input_var.set(str(quality))
 
     def _update_fmt_desc(self):
         fmt = self.fmt_var.get()
@@ -420,13 +724,190 @@ class PDF2ImageApp:
     # ------------------------------------------------------------------
     # 事件
     # ------------------------------------------------------------------
-    def _on_enhance_toggle(self):
-        """勾选/取消增强时，展开或收起参数面板"""
-        if self.enhance_var.get():
-            self.enhance_params_frame.grid()
+    def _on_input_path_change(self):
+        """根据路径即时更新输入类型与就绪状态。"""
+        raw = self.input_path.get().strip()
+        if not raw:
+            self.input_type_var.set("PDF / WORD")
+            self.input_status_var.set("等待选择文档")
+            if hasattr(self, "btn_convert") and not getattr(self, "_running", False):
+                self.btn_convert.config(state=tk.DISABLED)
+            if hasattr(self, "status_var") and not getattr(self, "_running", False):
+                self.status_var.set("等待选择文档")
+            return
+
+        path = Path(raw)
+        ext = path.suffix.lower()
+        if ext == ".pdf":
+            doc_type = "PDF"
+        elif ext in {".doc", ".docx"}:
+            doc_type = "WORD"
         else:
-            self.enhance_params_frame.grid_remove()
+            doc_type = "未知格式"
+
+        self.input_type_var.set(doc_type)
+        if ext not in SUPPORTED_INPUT_EXTENSIONS:
+            self.input_status_var.set("格式不受支持")
+            if hasattr(self, "btn_convert") and not getattr(self, "_running", False):
+                self.btn_convert.config(state=tk.DISABLED)
+            if hasattr(self, "status_var") and not getattr(self, "_running", False):
+                self.status_var.set("请选择 PDF、DOC 或 DOCX")
+        elif path.is_file():
+            self.input_status_var.set(f"{doc_type} · 已选择")
+            if hasattr(self, "btn_convert") and not getattr(self, "_running", False):
+                self.btn_convert.config(state=tk.NORMAL)
+            if hasattr(self, "status_var") and not getattr(self, "_running", False):
+                self.status_var.set("准备就绪")
+        else:
+            self.input_status_var.set("路径待确认")
+            if hasattr(self, "btn_convert") and not getattr(self, "_running", False):
+                self.btn_convert.config(state=tk.DISABLED)
+            if hasattr(self, "status_var") and not getattr(self, "_running", False):
+                self.status_var.set("请确认来源文件路径")
+
+    def _on_page_mode_change(self):
+        """仅在自定义页面模式下启用页码输入框。"""
+        if hasattr(self, "custom_entry"):
+            state = tk.NORMAL if self.page_range_var.get() == "custom" else tk.DISABLED
+            self.custom_entry.config(state=state)
+        self._refresh_choice_styles()
+        if hasattr(self, "summary_var"):
+            self._refresh_summary()
+
+    def _on_enhance_toggle(self):
+        """启用扫描件优化，并联动高级参数按钮。"""
+        enabled = self.enhance_var.get()
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self.enhance_settings_btn.config(state=state)
+        self.enhance_option_text.set(
+            "优化扫描件 · 已开启\n锐化 · 去黄 · 对比度"
+            if enabled
+            else "优化扫描件\n锐化 · 去黄 · 对比度"
+        )
+        self._refresh_choice_styles()
         self._refresh_summary()
+
+    def _open_enhance_settings(self):
+        """在独立窗口中调整低频使用的扫描件参数。"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("扫描件优化参数")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.configure(bg=self.colors["workspace"])
+
+        outer, card = self._create_card(dialog, padding=(20, 18))
+        outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+        card.columnconfigure(1, weight=1)
+        ttk.Label(card, text="SCAN ENHANCEMENT", style="Kicker.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky=tk.W
+        )
+        ttk.Label(card, text="优化扫描件", style="CardTitle.TLabel").grid(
+            row=1, column=0, columnspan=3, sticky=tk.W, pady=(3, 0)
+        )
+        ttk.Label(
+            card,
+            text="适合发黄、文字边缘模糊或对比度不足的扫描页面。",
+            style="Secondary.TLabel",
+        ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(5, 16))
+
+        controls = (
+            ("锐化", "增强文字与线条边缘", self.enhance_sharpness, 0, 200),
+            ("去黄", "自动拉伸色阶，减轻纸张底色", self.enhance_cutoff, 0, 10),
+            ("对比度", "拉开文字与背景的明暗差异", self.enhance_contrast, 1.0, 2.0),
+        )
+        trace_handles = []
+        for index, (label, hint, variable, start, end) in enumerate(controls):
+            row = 3 + index * 2
+            ttk.Label(card, text=label, style="FieldLabel.TLabel").grid(
+                row=row, column=0, sticky=tk.W
+            )
+            ttk.Label(card, text=hint, style="Secondary.TLabel").grid(
+                row=row, column=1, sticky=tk.W, padx=(10, 0)
+            )
+            is_float = isinstance(variable, tk.DoubleVar)
+            input_var = tk.StringVar(
+                value=f"{variable.get():.2f}" if is_float else str(variable.get())
+            )
+
+            def commit_value(
+                var=variable,
+                text_var=input_var,
+                minimum=start,
+                maximum=end,
+                use_float=is_float,
+            ):
+                try:
+                    parsed = float(text_var.get().strip())
+                except ValueError:
+                    parsed = var.get()
+                parsed = max(minimum, min(maximum, parsed))
+                if use_float:
+                    var.set(round(parsed, 2))
+                    text_var.set(f"{var.get():.2f}")
+                else:
+                    var.set(round(parsed))
+                    text_var.set(str(var.get()))
+
+            entry = self._numeric_entry(
+                card,
+                input_var,
+                start=start,
+                end=end,
+                increment=0.01 if is_float else 1,
+                command=commit_value,
+            )
+            entry.grid(row=row, column=2, sticky=tk.E)
+            tk.Scale(
+                card,
+                from_=start,
+                to=end,
+                variable=variable,
+                orient=tk.HORIZONTAL,
+                resolution=0.01 if is_float else 1,
+                showvalue=False,
+                bg=self.colors["card"],
+                troughcolor="#DCE5F2",
+                activebackground=self.colors["accent"],
+                sliderrelief=tk.FLAT,
+                sliderlength=34,
+                width=16,
+                highlightthickness=0,
+            ).grid(
+                row=row + 1, column=0, columnspan=3, sticky=tk.EW,
+                pady=(7, 16),
+            )
+
+            def sync_input(*_, var=variable, text_var=input_var, use_float=is_float):
+                text_var.set(f"{var.get():.2f}" if use_float else str(var.get()))
+
+            trace_handles.append(
+                (variable, variable.trace_add("write", sync_input))
+            )
+
+        def close_dialog():
+            for variable, trace_id in trace_handles:
+                variable.trace_remove("write", trace_id)
+            dialog.destroy()
+
+        actions = ttk.Frame(card, style="Card.TFrame")
+        actions.grid(row=9, column=0, columnspan=3, sticky=tk.EW, pady=(2, 0))
+        ttk.Button(
+            actions, text="恢复默认", style="Browse.TButton",
+            command=self._enhance_reset_default,
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            actions, text="完成", style="Action.TButton", command=close_dialog,
+        ).pack(side=tk.RIGHT)
+
+        dialog.update_idletasks()
+        width = max(520, dialog.winfo_reqwidth())
+        height = dialog.winfo_reqheight()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - width) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - height) // 2
+        dialog.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        dialog.grab_set()
+        dialog.focus_set()
 
     def _enhance_reset_default(self):
         """恢复增强参数为默认值"""
@@ -435,14 +916,19 @@ class PDF2ImageApp:
         self.enhance_contrast.set(1.15)
         self._refresh_summary()
 
-    def _browse_pdf(self):
+    def _browse_input(self):
         path = filedialog.askopenfilename(
-            title="选择 PDF 文件",
-            filetypes=[("PDF 文件", "*.pdf"), ("所有文件", "*.*")],
+            title="选择 PDF 或 Word 文件",
+            filetypes=[
+                ("支持的文档", "*.pdf *.doc *.docx"),
+                ("PDF 文件", "*.pdf"),
+                ("Word 文件", "*.doc *.docx"),
+                ("所有文件", "*.*"),
+            ],
         )
         if not path:
             return
-        self.pdf_path.set(path)
+        self.input_path.set(path)
 
         # 自动设置输出目录
         p = Path(path)
@@ -467,75 +953,34 @@ class PDF2ImageApp:
             parts.append(f"质量 {self.quality_var.get()}")
         if self.enhance_var.get():
             parts.append("增强已开启")
+        self.output_type_var.set(self.fmt_var.get())
         self.summary_var.set(" · ".join(parts))
-
-    def _parse_pages(self, total: int) -> list:
-        """解析用户输入的页面范围，返回 0-based 页码列表"""
-        if self.page_range_var.get() == "all":
-            return list(range(total))
-
-        raw = self.custom_pages_var.get().strip()
-        if not raw:
-            raise ValueError("请填写页面范围，或选择「全部页面」")
-
-        pages = []
-        # 支持格式: 1,3,5-10,12
-        parts = re.split(r"[,，\s]+", raw)
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            if "-" in part:
-                a, b = part.split("-", 1)
-                start, end = int(a.strip()), int(b.strip())
-                if start < 1 or end > total or start > end:
-                    raise ValueError(f"页码范围无效: {part}（共 {total} 页）")
-                pages.extend(range(start - 1, end))
-            else:
-                n = int(part)
-                if n < 1 or n > total:
-                    raise ValueError(f"页码无效: {n}（共 {total} 页）")
-                pages.append(n - 1)
-
-        if not pages:
-            raise ValueError("未解析到有效页码")
-
-        # 去重并保持顺序
-        seen = set()
-        return [p for p in pages if not (p in seen or seen.add(p))]  # type: ignore
 
     def _start_convert(self):
         if self._running:
             return
 
-        pdf = self.pdf_path.get().strip()
+        input_path = self.input_path.get().strip()
         out = self.out_dir.get().strip()
 
-        if not pdf:
-            messagebox.showwarning("提示", "请先选择 PDF 文件")
+        if not input_path:
+            messagebox.showwarning("提示", "请先选择 PDF 或 Word 文件")
             return
-        if not os.path.isfile(pdf):
-            messagebox.showerror("错误", "PDF 文件不存在")
+        if not os.path.isfile(input_path):
+            messagebox.showerror("错误", "输入文件不存在")
+            return
+        if Path(input_path).suffix.lower() not in SUPPORTED_INPUT_EXTENSIONS:
+            messagebox.showerror("错误", "仅支持 PDF、DOC、DOCX 文件")
             return
         if not out:
             messagebox.showwarning("提示", "请选择输出目录")
             return
 
-        # 验证 PDF 可打开并获取页数
-        try:
-            import fitz
-            doc = fitz.open(pdf)
-            total = len(doc)
-            doc.close()
-        except Exception as e:
-            messagebox.showerror("错误", f"无法打开 PDF 文件:\n{e}")
-            return
-
-        # 验证页面范围
-        try:
-            pages = self._parse_pages(total)
-        except ValueError as e:
-            messagebox.showerror("页面范围错误", str(e))
+        page_range = None
+        if self.page_range_var.get() == "custom":
+            page_range = self.custom_pages_var.get().strip()
+        if self.page_range_var.get() == "custom" and not page_range:
+            messagebox.showwarning("提示", "请填写页面范围，或选择「全部」")
             return
 
         self._running = True
@@ -554,18 +999,18 @@ class PDF2ImageApp:
 
         t = threading.Thread(
             target=self._do_convert,
-            args=(pdf, out, fmt, dpi, quality, pages, enhance,
+            args=(input_path, out, fmt, dpi, quality, page_range, enhance,
                   sharpness, cutoff, contrast),
             daemon=True,
         )
         t.start()
 
-    def _do_convert(self, pdf, out, fmt, dpi, quality, pages,
+    def _do_convert(self, input_path, out, fmt, dpi, quality, page_range,
                     enhance, sharpness, cutoff, contrast):
         try:
-            generated = pdf_to_images(
-                pdf, out, fmt=fmt, dpi=dpi, quality=quality,
-                pages=pages, progress_cb=self._on_progress,
+            generated = document_to_images(
+                input_path, out, fmt=fmt, dpi=dpi, quality=quality,
+                page_range=page_range, progress_cb=self._on_progress,
                 image_enhance=enhance,
                 enhance_sharpness=sharpness,
                 enhance_cutoff=cutoff,
@@ -617,8 +1062,15 @@ class PDF2ImageApp:
         messagebox.showerror("导出失败", friendly)
 
     def _reset_btn(self):
-        self.btn_convert.config(state=tk.NORMAL, text="开始导出")
         self._running = False
+        input_path = Path(self.input_path.get().strip())
+        state = (
+            tk.NORMAL
+            if input_path.is_file()
+            and input_path.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS
+            else tk.DISABLED
+        )
+        self.btn_convert.config(state=state, text="开始导出")
 
     @staticmethod
     def _fmt_size(byte: int) -> str:
